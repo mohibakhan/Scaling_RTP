@@ -1,0 +1,156 @@
+Current State Assessment
+4M transactions/month = ~1.5/sec average
+But payments are never uniform. Realistically:
+
+Peak hours could be 10-50x average = 15-75/sec
+Each payment touches 5 function apps + ~15 Cosmos operations + 2 Service Bus messages
+
+
+Areas to Address
+1. Azure Functions Scaling
+By default isolated worker functions scale automatically but you need the right hosting plan.
+Current risk: Consumption plan has cold start delays and scale limits.
+Fix: Use Premium Plan (EP1 or EP2) for all 5 function apps:
+
+Always-warm instances — no cold starts
+Pre-warmed instances handle burst traffic
+Set minimum instance count to 2-3 per service
+
+Gateway          → EP1, min 2 instances
+AccountResolution → EP1, min 2 instances
+Compliance        → EP2, min 2 instances (Alloy calls are slow)
+Transfer          → EP1, min 2 instances
+EventNotification → EP1, min 2 instances
+
+2. Service Bus — Premium Tier
+Your current Service Bus tier matters significantly.
+Standard tier limitations:
+
+Max message size 256KB
+No guaranteed throughput
+Shared infrastructure
+
+Fix: Upgrade to Premium tier:
+
+Dedicated messaging units
+1MB message size
+Predictable latency
+Set 1 messaging unit minimum, scale to 2-4 at peak
+
+Also tune your subscriptions:
+json"prefetchCount": 20,        // currently 10 — increase for throughput
+"maxConcurrentCalls": 16,   // already set correctly
+
+3. Cosmos DB — Request Units
+Each payment does approximately:
+
+Gateway: 2 writes (idempotency + transaction) = ~20 RUs
+AccountResolution: 4-5 reads = ~25 RUs
+Compliance: 2 reads/writes = ~10 RUs
+Transfer: 6 writes (2 entries + 2 balance patches + 2 reads) = ~60 RUs
+EventNotification: 1 write = ~10 RUs
+
+Total: ~125 RUs per payment
+At 75/sec peak: 9,375 RUs/sec needed
+Fix: Set Cosmos containers to autoscale:
+tchSendTransactions  → autoscale max 10,000 RU/s
+tchSendIdempotency   → autoscale max 5,000 RU/s
+ledgers              → autoscale max 10,000 RU/s
+ledgerEntries        → autoscale max 10,000 RU/s
+
+4. Idempotency — Gateway Bottleneck
+Currently the Gateway does two sequential Cosmos writes before publishing to Service Bus. At high volume this is the first bottleneck.
+Fix: Make the idempotency check a conditional upsert instead of read-then-write:
+csharp// Instead of read then create
+// Use CreateItemAsync with conflict detection
+try
+{
+    await _container.CreateItemAsync(idempotencyRecord, ...);
+}
+catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.Conflict)
+{
+    // Duplicate — return 409
+    return isDuplicate = true;
+}
+This saves one Cosmos round trip per payment.
+
+5. AccountResolution — Caching
+At 4M/month, the same accounts will be resolved repeatedly. Currently every payment does 3 Cosmos reads for account resolution.
+Fix: Add Azure Cache for Redis:
+csharp// Cache resolved account for 24 hours
+var cacheKey = $"account:{accountNumber}";
+var cached = await _cache.GetAsync<AccountResolutionResult>(cacheKey);
+if (cached is not null) return cached;
+
+// Resolve from Cosmos
+var result = await ResolveFromCosmosAsync(accountNumber);
+
+// Cache result
+await _cache.SetAsync(cacheKey, result, TimeSpan.FromHours(24));
+return result;
+This could reduce AccountResolution Cosmos reads by 80-90%.
+
+6. Transfer — Prefund Resolution Caching
+Currently every payment does 3 Cosmos reads to resolve the RTPPrefund account. This is the same data every time for a given fintechId.
+Fix: Cache the PrefundResolutionResult in memory since it almost never changes:
+csharp// In-memory cache — singleton lifetime
+private static readonly ConcurrentDictionary<string, PrefundResolutionResult> 
+    _prefundCache = new();
+
+public async Task<PrefundResolutionResult?> ResolvePrefundLedgerAsync(string fintechId, ...)
+{
+    if (_prefundCache.TryGetValue(fintechId, out var cached))
+        return cached;
+
+    var result = await ResolveFromCosmosAsync(fintechId, ...);
+    if (result is not null)
+        _prefundCache[fintechId] = result;
+
+    return result;
+}
+
+7. Compliance — Alloy SLA
+Once Alloy is integrated, KYC and TMS calls will be the slowest part of the pipeline. If Alloy takes 2-3 seconds per call and you're running source + destination in parallel, that's still 2-3 seconds per payment in Compliance.
+Mitigation:
+
+Cache KYC results by entityId with a 31-day TTL (you already had this logic in the Node code)
+This means returning customers skip the Alloy call entirely
+
+
+8. Observability — Critical at Scale
+At 4M/month you cannot debug issues manually. You need:
+Application Insights:
+
+Correlate all logs by evolveId and correlationId across all 5 services
+Set up alerts on dead letter queue depth
+Alert on function error rate > 1%
+
+Service Bus Dead Letter Monitoring:
+
+Each subscription has a dead letter queue
+Set up an alert when DLQ depth > 10
+
+Cosmos Monitoring:
+
+Alert on RU consumption > 80% of provisioned
+Alert on throttled requests (429s)
+
+
+9. Load Testing — Before Go-Live
+Before handling real traffic, run a load test:
+Tool: Azure Load Testing or k6
+Target: Gateway POST /tptch/send
+Ramp: 0 → 75 req/sec over 5 minutes
+Duration: 30 minutes at peak
+Watch for:
+
+Service Bus message lag growing
+Cosmos 429 throttling
+Function cold starts
+Dead letter queue accumulation
+
+
+Priority Order
+PriorityActionImpact1Premium Plan for all Function AppsEliminates cold starts2Service Bus Premium tierGuaranteed throughput3Cosmos autoscale on all containersPrevents throttling4Gateway idempotency — conditional upsertReduces latency5Redis cache for AccountResolution-80% Cosmos reads6In-memory cache for PrefundResolution-3 Cosmos reads/payment7KYC result caching (post-Alloy)Reduces Alloy calls8Observability alertsRequired for production9Load testValidates everything
+Items 1-3 are infrastructure — no code changes, just Azure portal config.
+Items 4-7 are code changes — we can implement them when ready.
