@@ -1,0 +1,82 @@
+Alloy Calls in Original Node Code
+1. KYC — Individual Onboarding
+javascriptawait ctx.call('sanctions.kycOnboardL1', { kycInput: kycInput })
+Input:
+json{
+    "entity_id": "<internal-entity-id>",
+    "address_country_code": "US"
+}
+2. KYC — Business Onboarding
+javascriptawait ctx.call('sanctions.kycOnboardBuisL1', { kycInput: kycInput })
+Input:
+json{
+    "entity_id": "<internal-entity-id>",
+    "business_address_country_code": "US",
+    "business_federal_ein": "<tax-id>"
+}
+3. KYC — Individual Re-verification
+javascriptawait ctx.call('sanctions.kycVerify', { kycInput: kycInput })
+Same input as individual onboarding.
+4. KYC — Business Re-verification
+javascriptawait ctx.call('sanctions.kycBuisVerify', { kycInput: kycInput })
+Same input as business onboarding.
+5. TMS — Account Onboarding (new accounts only)
+javascriptawait ctx.call('sanctions.tmsAccountOnboard', { 
+    entity_id: sourceEntityId, 
+    remote_id: sourceRemoteId, 
+    endpoint: 'send' 
+})
+6. TMS — Transaction Screening
+javascriptawait ctx.call('sanctions.tmsOnboard', { 
+    entity_id: sourceEntityId, 
+    remote_id: sourceRemoteId, 
+    transaction_id: transactionId + '_s',
+    fintech_id: data.fintechId 
+})
+7. Alloy Webhook — Outcome Update
+javascript// tptch.alloy action — receives webhook from Alloy
+const { entity_token, outcome } = alloyPayload.data;
+// Updates KYC document outcome
+
+What You Need to Ask Alloy
+Authentication
+
+What auth mechanism? Basic Auth (workflow_token:workflow_secret) or API Key?
+Separate credentials for KYC vs TMS workflows?
+
+KYC Endpoints
+
+What is the endpoint to create/evaluate an entity? e.g. POST /v1/evaluations
+What fields does it expect for individual vs business?
+What does the response look like? Specifically:
+
+What field contains entity_token?
+What field contains outcome? (Approved, Manual Review, Denied)
+What field contains result? (success, failure)
+What field contains tags/flags?
+
+
+
+TMS Endpoints
+
+What is the endpoint for transaction screening?
+What fields does it expect? (entity_id, transaction_id, amount, remote_id?)
+What does the response look like? (Approved, Compliance Alert, Denied)
+
+Entity Management
+
+How do you create an entity in Alloy? Is it separate from evaluation or combined?
+Does Alloy store the entity and return an entity_token for future calls?
+What is the entity_id Alloy expects — is it your internal ID or does Alloy generate it?
+
+Webhooks
+
+Does Alloy send webhooks when a Manual Review is resolved?
+What is the webhook payload structure?
+What field identifies the entity? (entity_token?)
+What field contains the updated outcome?
+
+Re-evaluation
+
+How do you re-evaluate an existing entity (the 31-day re-check)?
+Is it the same endpoint with the entity_token, or a different endpoint?
