@@ -1,0 +1,9 @@
+- task: AzureFunctionApp@2
+  displayName: 'Deploy AccountResolution Function App - DEV'
+  inputs:
+    connectedServiceNameARM: 'Dev-Evolve-SvcCon'
+    appType: functionApp
+    appName: 'fa-pmtsvc-acctres-dev-centralus'
+    package: '$(Pipeline.Workspace)/$(ArtifactName)/$(FunctionAppName).zip'
+    deploymentMethod: zipDeploy
+    appSettings: '-AZURE_FUNCTIONS_ENVIRONMENT DEV -SERVICE_BUS_CONNSTRING "$(SB_CONNSTRING_DEV)"'
